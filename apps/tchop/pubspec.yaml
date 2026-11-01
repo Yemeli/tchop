@@ -1,0 +1,52 @@
+name: tchop
+description: "Tchop — multi-tenant restaurant management + delivery platform for Cameroon/Africa (working codename)."
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  connectivity_plus: ^6.1.0 # Connectivity-aware sync retries.
+  drift: ^2.28.0 # Local persistence + offline-first sync.
+  firebase_messaging: ^15.0.0 # Push notifications (free tier).
+  flutter:
+    sdk: flutter
+  # Secure on-device storage for pasted API keys (Keychain / Keystore).
+  # Platform keys (Supabase, Maps, MQTT) are pasted at RUNTIME via the
+  # super-admin Configuration screen and persist here — no rebuild needed.
+  flutter_secure_storage: ^9.2.2
+  geolocator: ^13.0.0 # Location + maps.
+  google_maps_flutter: ^2.10.0
+  image_picker: ^1.1.0 # Media + formatting + ids.
+  intl: ^0.20.0
+  mqtt_client: ^10.0.0 # Driver GPS streaming (transient, low-bandwidth; NOT via DB writes).
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  rive: ^0.13.0 # Motion / 3D (Rive primary, per design brief).
+  sqlite3_flutter_libs: '^0.6.0+eol'
+  supabase_flutter: ^2.5.0 # Backend (Supabase: Postgres + RLS + Realtime + Auth + Storage).
+  url_launcher: ^6.3.0 # External intents (tel: links, geo: navigation URIs).
+  uuid: ^4.5.0
+  # Desktop window management (Windows / macOS / Linux only).
+  # Used in bootstrap.dart behind platform guards — mobile/web never
+  # touch it. Sets a sensible default window size on desktop.
+  window_manager: ^0.4.3
+
+dev_dependencies:
+  build_runner: ^2.4.0
+  drift_dev: ^2.28.0
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/tenant_sample.json
+    # Brand mascot Rive animations — files are PENDING brand artwork.
+    # Expected: splash.riv, order-success.riv, empty-cart.riv,
+    # delivery-arrived.riv (< 500 KB each, see MascotRegistry).
+    # Until they land, MascotWidget renders its drawn fallback and every
+    # screen still ships complete.
+    - assets/rive/

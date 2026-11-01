@@ -1,0 +1,248 @@
+# ============================================================================
+# TCHOP — backend local en UNE commande :
+#
+#   ./docker/genkeys.sh   # une fois : génère les secrets (.env à la racine)
+#   docker compose up -d  # lance tout : base + auth + api + realtime + storage
+#
+# UN SEUL fichier de secrets (.env à la racine) : il sert à la fois à
+# l'interpolation des variables du compose ET aux conteneurs (env_file).
+# Ne jamais en maintenir deux copies — un mot de passe désynchronisé entre
+# la base initialisée et les services = "password authentication failed".
+#
+# L'app Flutter se connecte ensuite via son écran Configuration
+# (super-admin) : URL = http://<IP>:8000, clé = ANON_KEY du .env.
+# Détails : docs/docker.md
+# ============================================================================
+name: tchop
+
+services:
+  db:
+    image: supabase/postgres:17.6.1.136
+    container_name: tchop-db
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - tchop-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # Rôles de service PostgreSQL (one-shot). Tourne UNE fois que le db est
+  # sain : crée supabase_auth_admin, supabase_storage_admin, supabase_admin,
+  # authenticator, anon, authenticated, service_role. Ne PAS passer par
+  # /docker-entrypoint-initdb.d (l'entrypoint custom crée le rôle postgres
+  # après les scripts d'init — un échec y annule toute l'initialisation).
+  db-roles:
+    image: postgres:17-alpine
+    container_name: tchop-db-roles
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./docker/db-roles.sh:/db-roles.sh:ro
+    command: ["sh", "/db-roles.sh"]
+
+  auth:
+    image: supabase/gotrue:v2.196.0
+    container_name: tchop-auth
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      API_EXTERNAL_URL: http://localhost:8000
+      GOTRUE_SITE_URL: http://localhost:8000
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "true"
+      # DEV UNIQUEMENT : aucun SMS réel n'est envoyé. En production au
+      # Cameroun, configurez un fournisseur (GOTRUE_SMS_TWILIO_*). Voir docs/docker.md
+      GOTRUE_SMS_AUTOCONFIRM: "true"
+    ports:
+      - "9999:9999"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  storage:
+    image: supabase/storage-api:v1.74.0
+    container_name: tchop-storage
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      STORAGE_PUBLIC_URL: http://localhost:8000/storage/v1
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: storage
+      REGION: local
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+      IMGPROXY_URL: http://127.0.0.1:1
+    volumes:
+      - tchop-storage-data:/var/lib/storage
+    ports:
+      - "5001:5000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  # Conteneur éphémère : applique les 9 migrations dans l'ordre (00_*.sql …
+  # 08_*.sql), les grants, puis le seed démo. Ne tourne qu'au premier
+  # démarrage (et après `docker compose down -v`).
+  migrate:
+    image: postgres:17-alpine
+    container_name: tchop-migrate
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGDATABASE: postgres
+      SEED_DEMO: ${SEED_DEMO:-true}
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./docker/migrate.sh:/migrate.sh:ro
+      - ./docker/pre_extensions.sql:/pre.sql:ro
+      - ./docker/grants.sql:/grants.sql:ro
+      - ./docker/seed.sql:/seed.sql:ro
+    command: ["sh", "/migrate.sh"]
+    restart: "no"
+
+  rest:
+    image: postgrest/postgrest:v14.17
+    container_name: tchop-rest
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  realtime:
+    # Le nom du conteneur est volontairement `realtime-dev.supabase-realtime` :
+    # realtime déduit son tenant id du sous-domaine (pattern officiel).
+    image: supabase/realtime:v2.134.10
+    container_name: realtime-dev.supabase-realtime
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: [.env]
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: ''
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sSfL --head -o /dev/null -H \"Authorization: Bearer ${ANON_KEY}\" http://127.0.0.1:4000/api/tenants/realtime-dev/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Passerelle unique : l'app Flutter n'a besoin que d'UNE url,
+  # http://<hôte>:8000 (routes /auth/v1, /rest/v1, /realtime/v1, /storage/v1).
+  gateway:
+    image: kong:2.8.1
+    container_name: tchop-gateway
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+      realtime:
+        condition: service_started
+      storage:
+        condition: service_started
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: "off"
+    volumes:
+      - ./docker/kong.yml:/kong/kong.yml:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/8000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  tchop-db-data:
+  tchop-storage-data:

@@ -1,0 +1,14 @@
+# Secrets — ne jamais commiter
+docker/.env
+.env
+*.pem
+*.key
+
+# Archives distribuées
+tchop-source.zip
+
+# Flutter / Dart
+.dart_tool/
+build/
+.idea/
+*.g.dart
